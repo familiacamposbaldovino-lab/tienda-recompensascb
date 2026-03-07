@@ -1,30 +1,23 @@
 // ================================================================
-// AUDIO ENGINE (Web Audio API - 8-bit sounds)
+// AUDIO ENGINE
 // ================================================================
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 let audioCtx = null;
-
-function getAudioCtx() {
-  if (!audioCtx) audioCtx = new AudioCtx();
-  return audioCtx;
-}
+function getAudioCtx() { if (!audioCtx) audioCtx = new AudioCtx(); return audioCtx; }
 
 function playSound(type) {
   try {
     const ctx = getAudioCtx();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
+    osc.connect(gain); gain.connect(ctx.destination);
     if (type === 'coin') {
       osc.type = 'square';
       osc.frequency.setValueAtTime(988, ctx.currentTime);
       osc.frequency.setValueAtTime(1319, ctx.currentTime + 0.1);
       gain.gain.setValueAtTime(0.3, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.3);
+      osc.start(); osc.stop(ctx.currentTime + 0.3);
     } else if (type === 'buy') {
       osc.type = 'square';
       osc.frequency.setValueAtTime(523, ctx.currentTime);
@@ -32,305 +25,205 @@ function playSound(type) {
       osc.frequency.setValueAtTime(784, ctx.currentTime + 0.2);
       gain.gain.setValueAtTime(0.3, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
+      osc.start(); osc.stop(ctx.currentTime + 0.4);
     } else if (type === 'error') {
       osc.type = 'square';
       osc.frequency.setValueAtTime(220, ctx.currentTime);
       osc.frequency.setValueAtTime(150, ctx.currentTime + 0.15);
       gain.gain.setValueAtTime(0.2, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.3);
+      osc.start(); osc.stop(ctx.currentTime + 0.3);
     } else if (type === 'submit') {
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(440, ctx.currentTime);
       osc.frequency.setValueAtTime(550, ctx.currentTime + 0.08);
       gain.gain.setValueAtTime(0.2, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.25);
+      osc.start(); osc.stop(ctx.currentTime + 0.25);
     }
   } catch(e) {}
 }
 
 // ================================================================
-// DATA LAYER — LocalStorage + Google Sheets (Apps Script)
+// DATA LAYER — Google Sheets + localStorage
 // ================================================================
-
-// ── Google Sheets endpoint ──────────────────────────────────────
 const GS_URL = 'https://script.google.com/macros/s/AKfycbw4c8-CS4wZIb5naVCwP_nvX5pZ6WS_MHvCiL4qpw5cuqdYFAPBLtCE2jPwhhChHFWe/exec';
+const STORAGE_KEY   = 'familiacamposbaldovino_v2';
+const REQUESTS_KEY  = 'requests';
 
-// ── Estado global de requests (bandeja compartida) ───────────────
-let requests = []; // Array de solicitudes de compra
-let requestsUpdatedAt = null; // Para detectar cambios en autosync
-let cloudOk = true; // indicador de conexión a Sheets
-let autoSyncInterval = null;
+let requests        = [];
+let requestsUpdatedAt = null;
+let autoSyncInterval     = null;
+let adminStateSyncInterval = null;
+let cloudOk = true;
 
-// ── Key helpers ──────────────────────────────────────────────────
-function getUserStateKey(userId) { return 'state_' + userId; }
-const REQUESTS_KEY = 'requests';
-
-// ── JSONP helper (evita CORS en el GET) ─────────────────────────
+// ── JSONP ────────────────────────────────────────────────────────
 function jsonp(url, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const cbName = 'cb_' + Math.random().toString(36).slice(2);
     const u = new URL(url);
     u.searchParams.set('callback', cbName);
-
     const script = document.createElement('script');
     let done = false;
 
-    function cleanup() {
-      try { delete window[cbName]; } catch(_) {}
-      try { script.remove(); } catch(_) {}
-    }
-
-    const timer = setTimeout(() => {
-      if (done) return;
+    const cleanup = () => {
       done = true;
-      // Ojo: NO borramos el callback inmediatamente para evitar:
-      // "Uncaught ReferenceError: cb_xxx is not defined" si la respuesta llega tarde.
-      reject(new Error('JSONP timeout'));
-      setTimeout(cleanup, 15000);
-    }, timeoutMs);
-
-    window[cbName] = (data) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve(data);
-      // deja el callback vivo un momento (cache + ejecución tardía)
-      setTimeout(cleanup, 1000);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
     };
 
-    script.onerror = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      cleanup();
-      reject(new Error('JSONP script error'));
-    };
+    window[cbName] = (data) => { cleanup(); resolve(data); };
+    script.onerror = () => { cleanup(); reject(new Error('JSONP error')); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('JSONP timeout')); }, timeoutMs);
 
+    window[cbName] = (data) => { clearTimeout(timer); cleanup(); resolve(data); };
     script.src = u.toString();
-    document.body.appendChild(script);
+    document.head.appendChild(script);
   });
 }
 
-
-// ── Cargar una key arbitraria desde Sheets ───────────────────────
 async function loadKeyFromSheets(key) {
   try {
     const url = `${GS_URL}?action=get&key=${encodeURIComponent(key)}`;
-    console.log(`[GS] GET key="${key}"...`);
     const res = await jsonp(url);
-    if (res && res.ok && res.data) {
-      let data = (typeof res.data === 'string') ? JSON.parse(res.data) : res.data;
-      // Desenvuelve doble envoltura { key, data } que Apps Script genera al guardar { key, data }
-      if (data && data.key !== undefined && data.data !== undefined) data = data.data;
-      if (typeof data === 'string') data = JSON.parse(data);
-      console.log(`[GS] ✅ key="${key}" cargada. updatedAt:`, res.updatedAt);
-      setCloudStatus(true);
-      return { data, updatedAt: res.updatedAt };
-    }
-    console.warn(`[GS] key="${key}" sin data remota.`);
-    return null;
-  } catch (e) {
-    console.warn(`[GS] ❌ Error cargando key="${key}":`, e.message);
-    setCloudStatus(false);
+    if (!res) return null;
+    // Respuesta puede ser { ok, data, updatedAt } o { data, updatedAt }
+    let data = res.data ?? res;
+    if (data && data.key !== undefined && data.data !== undefined) data = data.data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch(e) {} }
+    return { data, updatedAt: res.updatedAt || null };
+  } catch(e) {
+    console.warn('[GS] loadKey error:', e.message);
     return null;
   }
 }
 
-// ── Guardar una key arbitraria en Sheets ─────────────────────────
 async function saveKeyToSheets(key, data) {
   try {
     await fetch(GS_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain' },
+      method: 'POST', mode: 'no-cors',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key, data })
     });
-    console.log(`[GS] ✅ POST key="${key}" enviado.`);
-    setCloudStatus(true);
-  } catch (e) {
-    console.warn(`[GS] ❌ Error guardando key="${key}":`, e.message);
-    setCloudStatus(false);
-  }
+  } catch(e) { console.warn('[GS] saveKey error:', e.message); }
 }
 
-// ── Indicador visual de conexión a nube ──────────────────────────
+function unwrapSheets(res) {
+  if (!res) return null;
+  let raw = res.data;
+  if (!raw) return null;
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch(e) {} }
+  if (raw && raw.key !== undefined && raw.data !== undefined) raw = raw.data;
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch(e) {} }
+  return raw;
+}
+
 function setCloudStatus(ok) {
   cloudOk = ok;
   const el = document.getElementById('cloudStatus');
-  if (el) {
-    el.textContent = ok ? '☁️ Nube OK' : '⚠️ Sin nube';
-    el.style.color = ok ? '#9fc' : '#f88';
-  }
+  if (!el) return;
+  el.textContent = ok ? '☁️ OK' : '⚠️ Sin sync';
+  el.className = ok ? 'cloud-ok' : 'cloud-err';
 }
 
-// ── Requests: cargar ─────────────────────────────────────────────
+// ── Requests ─────────────────────────────────────────────────────
 async function loadRequests() {
-  const lsKey = 'fcb_requests';
   const result = await loadKeyFromSheets(REQUESTS_KEY);
   if (result) {
-    let d = result.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch(_) {} }
-    requests = Array.isArray(d) ? d : [];
-    requestsUpdatedAt = result.updatedAt;
-    localStorage.setItem(lsKey, JSON.stringify(requests));
-    return;
+    const fresh = unwrapSheets(result);
+    if (Array.isArray(fresh)) {
+      requests = fresh;
+      requestsUpdatedAt = result.updatedAt;
+      localStorage.setItem('fcb_requests', JSON.stringify(requests));
+      return;
+    }
   }
-  // Fallback localStorage
-  try {
-    const raw = localStorage.getItem(lsKey);
-    requests = raw ? JSON.parse(raw) : [];
-  } catch(e) { requests = []; }
-
-  // Si no hay requests en Sheets pero sí local, los subimos (1 vez)
-  if (requests.length && !localStorage.getItem('fcb_seeded_requests')) {
-    console.log('[DATA] Sembrando requests en Google Sheets…');
-    await saveRequests();
-    localStorage.setItem('fcb_seeded_requests', '1');
-  }
+  const raw = localStorage.getItem('fcb_requests');
+  if (raw) { try { requests = JSON.parse(raw); } catch(e) { requests = []; } }
 }
 
-// ── Requests: guardar ────────────────────────────────────────────
 async function saveRequests() {
   localStorage.setItem('fcb_requests', JSON.stringify(requests));
   await saveKeyToSheets(REQUESTS_KEY, requests);
 }
 
-// ── Requests: agregar solicitud de compra ────────────────────────
+// ── Request workflow ──────────────────────────────────────────────
 async function addRequest(reward, user) {
-  // Evitar duplicado pendiente del mismo usuario+reward
-  const dup = requests.find(r => r.userId === user.id && r.rewardId === reward.id && r.status === 'pending');
-  if (dup) {
-    showToast('⏳ Ya tienes una solicitud pendiente para esta recompensa');
-    return false;
-  }
+  const already = requests.some(r => r.userId === user.id && r.rewardId === reward.id && r.status === 'pending');
+  if (already) { showToast('⏳ Ya tienes una solicitud pendiente de ese premio'); return false; }
   const req = {
-    id: 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
-    userId: user.id,
-    userName: user.name,
-    userAvatar: user.avatar,
-    rewardId: reward.id,
-    rewardName: reward.name,
-    rewardIcon: reward.icon || '🏆',
-    cost: reward.cost,
-    type: reward.type,
-    status: 'pending',       // pending | approved | delivered | rejected
-    createdAt: new Date().toISOString(),
-    approvedBy: null, approvedAt: null,
-    deliveredAt: null,
-    rejectedBy: null, rejectedAt: null,
+    id: 'req_' + Date.now(),
+    userId: user.id, userName: user.name, userAvatar: user.avatar,
+    rewardId: reward.id, rewardName: reward.name, rewardIcon: reward.icon, cost: reward.cost, type: reward.type,
+    status: 'pending', createdAt: new Date().toISOString(),
+    approvedBy: null, approvedAt: null, deliveredAt: null, rejectedBy: null, rejectedAt: null
   };
-  requests.unshift(req);
+  requests.push(req);
   await saveRequests();
   return true;
 }
 
-// ── Requests: aprobar ────────────────────────────────────────────
 async function approveRequest(reqId) {
   const req = requests.find(r => r.id === reqId);
-  if (!req || req.status !== 'pending') return;
-  const userIdx = state.users.findIndex(u => u.id === req.userId);
-  if (userIdx < 0) return;
-  if (state.users[userIdx].coins < req.cost) {
-    showToast(`❌ ${req.userName} no tiene suficientes coins`);
-    playSound('error');
-    return;
-  }
-  req.status = 'approved';
-  req.approvedBy = currentUser.name;
-  req.approvedAt = new Date().toISOString();
+  if (!req) return;
   // Descontar coins
-  state.users[userIdx].coins -= req.cost;
-  // Registrar en historial de compras del state global
-  state.purchases.unshift({
-    userId: req.userId, userName: req.userName,
-    rewardId: req.rewardId, rewardName: req.rewardName,
-    rewardIcon: req.rewardIcon, cost: req.cost, type: req.type,
-    status: 'approved', requestId: req.id,
-    timestamp: req.approvedAt
-  });
-  playSound('coin');
-  spawnParticles('🪙', null, null);
-  await saveRequests();
-  saveData();
+  const userIdx = state.users.findIndex(u => u.id === req.userId);
+  if (userIdx >= 0) {
+    if (state.users[userIdx].coins < req.cost) { showToast('⚠️ No tiene suficientes coins'); return; }
+    state.users[userIdx].coins -= req.cost;
+  }
+  req.status = 'approved'; req.approvedBy = currentUser.name; req.approvedAt = new Date().toISOString();
+  state.purchases = state.purchases || [];
+  state.purchases.push({ userId: req.userId, userName: req.userName, rewardId: req.rewardId,
+    rewardName: req.rewardName, rewardIcon: req.rewardIcon, cost: req.cost, type: req.type,
+    status: 'approved', requestId: req.id, timestamp: req.approvedAt });
+  await saveRequests(); saveData();
   renderAdminPanel();
-  showToast(`✅ Aprobado: ${req.rewardName} → -${req.cost}🪙 de ${req.userName}`);
+  showToast(`✅ Aprobado: ${req.rewardName} → ${req.userName}`);
+  playSound('coin'); spawnParticles('🪙', null, null);
 }
 
-// ── Requests: marcar entregado ───────────────────────────────────
 async function deliverRequest(reqId) {
   const req = requests.find(r => r.id === reqId);
-  if (!req || req.status !== 'approved') return;
-  req.status = 'delivered';
-  req.deliveredAt = new Date().toISOString();
-  playSound('buy');
-  spawnConfetti();
+  if (!req) return;
+  req.status = 'delivered'; req.deliveredAt = new Date().toISOString();
   await saveRequests();
   renderAdminPanel();
-  showToast(`🎁 Entregado: ${req.rewardName} a ${req.userName}`);
+  showToast(`🎁 Entregado: ${req.rewardName}`);
 }
 
-// ── Requests: rechazar ───────────────────────────────────────────
 async function rejectRequest(reqId) {
   const req = requests.find(r => r.id === reqId);
-  if (!req || (req.status !== 'pending' && req.status !== 'approved')) return;
-  req.status = 'rejected';
-  req.rejectedBy = currentUser.name;
-  req.rejectedAt = new Date().toISOString();
-  playSound('error');
+  if (!req) return;
+  req.status = 'rejected'; req.rejectedBy = currentUser.name; req.rejectedAt = new Date().toISOString();
   await saveRequests();
   renderAdminPanel();
-  showToast(`❌ Rechazado: ${req.rewardName}`);
+  showToast(`❌ Rechazada: ${req.rewardName}`);
 }
 
-// ── AutoSync admin (cada 8s revisa si requests cambió) ───────────
-// ── Helper: desenvuelve doble envoltura y normaliza ─────────────
-function unwrapSheets(res) {
-  if (!res) return null;
-  // loadKeyFromSheets devuelve { data, updatedAt } — no tiene .ok
-  // jsonp directo devuelve { ok, data, updatedAt }
-  let raw = (res.ok !== undefined) ? res.data : res.data; // ambos tienen .data
-  if (!raw) return null;
-  if (typeof raw === 'string') raw = JSON.parse(raw);
-  // Desenvuelve { key, data } generado por Apps Script
-  if (raw && raw.key !== undefined && raw.data !== undefined) raw = raw.data;
-  if (typeof raw === 'string') raw = JSON.parse(raw);
-  return raw;
-}
-
+// ── Sync admin (requests) ─────────────────────────────────────────
 function startAdminAutoSync() {
   stopAdminAutoSync();
   autoSyncInterval = setInterval(async () => {
     try {
       const result = await loadKeyFromSheets(REQUESTS_KEY);
       if (!result) return;
-      if (result.updatedAt && result.updatedAt === requestsUpdatedAt) return; // sin cambios
-      console.log('[AUTOSYNC-ADMIN] Requests cambiaron, recargando...');
-      requestsUpdatedAt = result.updatedAt;
+      if (result.updatedAt && result.updatedAt === requestsUpdatedAt) return;
       const fresh = unwrapSheets(result);
       if (Array.isArray(fresh)) {
+        requestsUpdatedAt = result.updatedAt;
         requests = fresh;
         localStorage.setItem('fcb_requests', JSON.stringify(requests));
         renderAdminRequestsPanel();
         updateAdminRequestsBadge();
+        setCloudStatus(true);
       }
-      setCloudStatus(true);
     } catch(e) { setCloudStatus(false); }
   }, 8000);
 }
+function stopAdminAutoSync() { if (autoSyncInterval) { clearInterval(autoSyncInterval); autoSyncInterval = null; } }
 
-function stopAdminAutoSync() {
-  if (autoSyncInterval) { clearInterval(autoSyncInterval); autoSyncInterval = null; }
-}
-
-// ── AutoSync admin — estado global (pendingApprovals, coins) ─────
-let adminStateSyncInterval = null;
-
+// ── Sync admin (state) ────────────────────────────────────────────
 function startAdminStateAutoSync() {
   stopAdminStateAutoSync();
   adminStateSyncInterval = setInterval(async () => {
@@ -340,35 +233,27 @@ function startAdminStateAutoSync() {
       if (!result) return;
       if (result.updatedAt && result.updatedAt === stateUpdatedAt) return;
       const fresh = unwrapSheets(result);
-      if (!fresh || !fresh.users) return;
-      stateUpdatedAt = result.updatedAt;
-      state = normalizeState(fresh);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      renderAdminPanel();
-      setCloudStatus(true);
-      console.log('[AUTOSYNC-ADMIN] Estado global actualizado');
+      if (fresh && fresh.users) {
+        stateUpdatedAt = result.updatedAt;
+        state = normalizeState(fresh);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        renderAdminPanel();
+        setCloudStatus(true);
+      }
     } catch(e) { setCloudStatus(false); }
   }, 5000);
 }
-
-function stopAdminStateAutoSync() {
-  if (adminStateSyncInterval) { clearInterval(adminStateSyncInterval); adminStateSyncInterval = null; }
-}
+function stopAdminStateAutoSync() { if (adminStateSyncInterval) { clearInterval(adminStateSyncInterval); adminStateSyncInterval = null; } }
 
 async function syncRequestsNow() {
   showToast('🔄 Sincronizando...');
   try {
-    // 1. Recargar requests
     const rResult = await loadKeyFromSheets(REQUESTS_KEY);
     if (rResult) {
       requestsUpdatedAt = rResult.updatedAt;
       const fresh = unwrapSheets(rResult);
-      if (Array.isArray(fresh)) {
-        requests = fresh;
-        localStorage.setItem('fcb_requests', JSON.stringify(requests));
-      }
+      if (Array.isArray(fresh)) { requests = fresh; localStorage.setItem('fcb_requests', JSON.stringify(requests)); }
     }
-    // 2. Recargar estado global (coins, pendingApprovals)
     const sResult = await loadKeyFromSheets('state');
     if (sResult) {
       const fresh = unwrapSheets(sResult);
@@ -382,28 +267,78 @@ async function syncRequestsNow() {
     renderAdminRequestsPanel();
     updateAdminRequestsBadge();
     showToast('✅ Sincronizado');
-  } catch(e) {
-    showToast('⚠️ Error al sincronizar');
-    console.error('[SYNC]', e);
-  }
+  } catch(e) { showToast('⚠️ Error al sincronizar'); }
 }
 
-// ── Sync manual para usuario ─────────────────────────────────────
+// ── Sync usuario ─────────────────────────────────────────────────
+let userSyncInterval = null;
+let lastKnownRequestStates = {};
+
+function startUserSync() {
+  stopUserSync();
+  requests.filter(r => r.userId === currentUser?.id).forEach(r => { lastKnownRequestStates[r.id] = r.status; });
+  userSyncInterval = setInterval(async () => {
+    if (!currentUser || currentUser.role !== 'user') { stopUserSync(); return; }
+    try {
+      const rResult = await loadKeyFromSheets(REQUESTS_KEY);
+      if (rResult) {
+        const fresh = unwrapSheets(rResult);
+        if (Array.isArray(fresh)) {
+          fresh.filter(r => r.userId === currentUser.id).forEach(r => {
+            const prev = lastKnownRequestStates[r.id];
+            if (prev && prev !== r.status) {
+              if (r.status === 'approved')  { playSound('coin'); showToast(`✅ ¡Aprobado! ${r.rewardIcon} ${r.rewardName}`); spawnParticles('🪙', null, null); }
+              if (r.status === 'delivered') { playSound('buy');  showToast(`🎁 ¡Entregado! ${r.rewardIcon} ${r.rewardName}`); spawnConfetti(); }
+              if (r.status === 'rejected')  { playSound('error'); showToast(`❌ Rechazado: ${r.rewardName}`); }
+            }
+            lastKnownRequestStates[r.id] = r.status;
+          });
+          requests = fresh;
+          localStorage.setItem('fcb_requests', JSON.stringify(requests));
+        }
+      }
+      const sResult = await loadKeyFromSheets('state');
+      if (sResult) {
+        const fresh = unwrapSheets(sResult);
+        if (fresh && fresh.users) {
+          const prevCoins = state.users.find(u => u.id === currentUser.id)?.coins || 0;
+          state = normalizeState(fresh);
+          currentUser = state.users.find(u => u.id === currentUser.id);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          const newCoins = currentUser?.coins || 0;
+          if (newCoins > prevCoins) { playSound('coin'); showToast(`🪙 +${newCoins - prevCoins} coins! 🎉`); spawnParticles('🪙', null, null); }
+          // Actualizar displays de coins
+          document.getElementById('coinDisplay').textContent = newCoins;
+          document.getElementById('heroCoins').textContent   = newCoins;
+          const mcd = document.getElementById('modalCoinDisplay'); if (mcd) mcd.textContent = newCoins;
+        }
+      }
+      renderMissions();
+      renderMissionsPreview();
+      renderStoreRewards();
+      renderQuickHistory();
+      renderHistorialTab();
+      updatePendingBadge();
+      updateWeeklyProgress();
+      setCloudStatus(true);
+    } catch(e) { setCloudStatus(false); }
+  }, 10000);
+}
+function stopUserSync() { if (userSyncInterval) { clearInterval(userSyncInterval); userSyncInterval = null; } }
+
 async function manualUserRefresh() {
   showToast('🔄 Actualizando...');
   try {
-    // 1. Requests (estado de compras)
     const rResult = await loadKeyFromSheets(REQUESTS_KEY);
     if (rResult) {
       const fresh = unwrapSheets(rResult);
       if (Array.isArray(fresh)) {
-        // Notificar cambios de estado
         fresh.filter(r => r.userId === currentUser.id).forEach(r => {
           const prev = lastKnownRequestStates[r.id];
           if (prev && prev !== r.status) {
-            if (r.status === 'approved') { playSound('coin'); showToast(`✅ Aprobado: ${r.rewardIcon} ${r.rewardName}`); spawnParticles('🪙', null, null); }
-            else if (r.status === 'delivered') { playSound('buy'); showToast(`🎁 Entregado: ${r.rewardIcon} ${r.rewardName}`); spawnConfetti(); }
-            else if (r.status === 'rejected') { playSound('error'); showToast(`❌ Rechazado: ${r.rewardName}`); }
+            if (r.status === 'approved')  { playSound('coin'); showToast(`✅ Aprobado: ${r.rewardIcon} ${r.rewardName}`); spawnParticles('🪙', null, null); }
+            if (r.status === 'delivered') { playSound('buy');  showToast(`🎁 Entregado: ${r.rewardIcon} ${r.rewardName}`); spawnConfetti(); }
+            if (r.status === 'rejected')  { playSound('error'); showToast(`❌ Rechazado: ${r.rewardName}`); }
           }
           lastKnownRequestStates[r.id] = r.status;
         });
@@ -411,7 +346,6 @@ async function manualUserRefresh() {
         localStorage.setItem('fcb_requests', JSON.stringify(requests));
       }
     }
-    // 2. Estado global (coins, pendingApprovals aprobadas)
     const sResult = await loadKeyFromSheets('state');
     if (sResult) {
       const fresh = unwrapSheets(sResult);
@@ -421,31 +355,21 @@ async function manualUserRefresh() {
         currentUser = state.users.find(u => u.id === currentUser.id);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         const newCoins = currentUser?.coins || 0;
-        if (newCoins > prevCoins) {
-          playSound('coin');
-          showToast(`🪙 +${newCoins - prevCoins} coins! Misión aprobada 🎉`);
-          spawnParticles('🪙', null, null);
-        }
+        if (newCoins > prevCoins) { playSound('coin'); showToast(`🪙 +${newCoins - prevCoins} coins!`); }
         document.getElementById('coinDisplay').textContent = newCoins;
-        const mcd = document.getElementById('modalCoinDisplay');
-        if (mcd) mcd.textContent = newCoins;
+        document.getElementById('heroCoins').textContent   = newCoins;
+        const mcd = document.getElementById('modalCoinDisplay'); if (mcd) mcd.textContent = newCoins;
       }
     }
-    renderMissions();
-    renderStoreRewards();
-    renderPurchaseHistory();
-    updatePendingBadge();
+    renderMissions(); renderMissionsPreview(); renderStoreRewards();
+    renderQuickHistory(); renderHistorialTab(); updatePendingBadge(); updateWeeklyProgress();
     showToast('✅ Actualizado');
-  } catch(e) {
-    showToast('⚠️ No se pudo actualizar');
-    console.error('[USER-SYNC]', e);
-  }
+  } catch(e) { showToast('⚠️ No se pudo actualizar'); }
 }
 
 // ================================================================
-
-const STORAGE_KEY = 'familiacamposbaldovino_v2';
-
+// STATE / DATA
+// ================================================================
 const DEFAULT_DATA = {
   users: [
     { id: 'cristian', name: 'Cristian', role: 'admin', pin: '1995', avatar: '👨', coins: 0 },
@@ -454,15 +378,15 @@ const DEFAULT_DATA = {
     { id: 'mateo',    name: 'Mateo',    role: 'user',  pin: '1234', avatar: '👦', coins: 0 },
   ],
   tasks: [
-    { id: 't1',  userId: 'mateo', name: 'Tender la cama',   icon: '🛏️', coins: 1,  freq: 'Diaria'  },
-    { id: 't2',  userId: 'mateo', name: 'Lavar los platos', icon: '🍽️', coins: 10, freq: 'Diaria'  },
-    { id: 't3',  userId: 'mateo', name: 'Doblar ropa',      icon: '👕', coins: 10, freq: 'Semanal' },
-    { id: 't4',  userId: 'mateo', name: 'Colgar ropa',      icon: '🪝', coins: 5,  freq: 'Semanal' },
-    { id: 't5',  userId: 'mateo', name: 'Lavar ropa',       icon: '🫧', coins: 5,  freq: 'Semanal' },
-    { id: 't6',  userId: 'mateo', name: 'Barrer',           icon: '🧹', coins: 10, freq: 'Diaria'  },
-    { id: 't7',  userId: 'mateo', name: 'Trapear',          icon: '🪣', coins: 10, freq: 'Semanal' },
-    { id: 't8',  userId: 'mateo', name: 'Organizar sala',   icon: '🛋️', coins: 5,  freq: 'Diaria'  },
-    { id: 't9',  userId: 'mateo', name: 'Limpiar comedor',  icon: '🪑', coins: 5,  freq: 'Semanal' },
+    { id: 't1', userId: 'mateo', name: 'Tender la cama',   icon: '🛏️', coins: 1,  freq: 'Diaria'  },
+    { id: 't2', userId: 'mateo', name: 'Lavar los platos', icon: '🍽️', coins: 10, freq: 'Diaria'  },
+    { id: 't3', userId: 'mateo', name: 'Doblar ropa',      icon: '👕', coins: 10, freq: 'Semanal' },
+    { id: 't4', userId: 'mateo', name: 'Colgar ropa',      icon: '🪝', coins: 5,  freq: 'Semanal' },
+    { id: 't5', userId: 'mateo', name: 'Lavar ropa',       icon: '🫧', coins: 5,  freq: 'Semanal' },
+    { id: 't6', userId: 'mateo', name: 'Barrer',           icon: '🧹', coins: 10, freq: 'Diaria'  },
+    { id: 't7', userId: 'mateo', name: 'Trapear',          icon: '🪣', coins: 10, freq: 'Semanal' },
+    { id: 't8', userId: 'mateo', name: 'Organizar sala',   icon: '🛋️', coins: 5,  freq: 'Diaria'  },
+    { id: 't9', userId: 'mateo', name: 'Limpiar comedor',  icon: '🪑', coins: 5,  freq: 'Semanal' },
   ],
   rewards: [
     { id: 'r1', name: '30 min de TV',    icon: '📺', cost: 30,  type: 'Tiempo' },
@@ -470,43 +394,29 @@ const DEFAULT_DATA = {
     { id: 'r3', name: '300 Robux',       icon: '🎮', cost: 300, type: 'Premio' },
     { id: 'r4', name: 'Pizza',           icon: '🍕', cost: 500, type: 'Premio' },
   ],
-  pendingApprovals: [], // {id, taskId, userId, taskName, coins, timestamp}
-  completedToday: [],   // task IDs completed (reset daily)
-  purchases: [],        // {userId, rewardId, rewardName, cost, timestamp}
-  lastReset: null,
+  pendingApprovals: [],
+  completedToday:   [],
+  purchases:        [],
+  lastReset:        null,
 };
 
 function normalizeState(s) {
-  // Si viene vacío o no es objeto, usa default completo
   if (!s || typeof s !== 'object') return JSON.parse(JSON.stringify(DEFAULT_DATA));
-
-  // Base completa
   const base = JSON.parse(JSON.stringify(DEFAULT_DATA));
   const out = { ...base, ...s };
-
-  // Asegura arrays obligatorios
-  out.users   = Array.isArray(out.users)   ? out.users   : base.users;
-  out.tasks   = Array.isArray(out.tasks)   ? out.tasks   : base.tasks;
-  out.rewards = Array.isArray(out.rewards) ? out.rewards : base.rewards;
-
-  // Asegura estructuras opcionales
-  out.purchases        = Array.isArray(out.purchases) ? out.purchases : [];
+  // Proteger coins: estado remoto siempre gana
+  if (Array.isArray(s.users) && s.users.length) {
+    out.users = s.users.map(ru => ({ ...(base.users.find(u => u.id === ru.id) || {}), ...ru }));
+  } else { out.users = base.users; }
+  out.tasks   = Array.isArray(s.tasks)   && s.tasks.length   ? s.tasks   : base.tasks;
+  out.rewards = Array.isArray(s.rewards) && s.rewards.length ? s.rewards : base.rewards;
+  out.purchases        = Array.isArray(out.purchases)        ? out.purchases        : [];
   out.pendingApprovals = Array.isArray(out.pendingApprovals) ? out.pendingApprovals : [];
-  out.completedToday   = Array.isArray(out.completedToday) ? out.completedToday : [];
+  out.completedToday   = Array.isArray(out.completedToday)   ? out.completedToday   : [];
   out.lastReset        = out.lastReset ?? null;
-
-  // compat legacy
-  out.requests = Array.isArray(out.requests) ? out.requests : [];
-
-  // Normaliza coins por usuario (evita undefined / strings)
-  out.users = out.users.map(u => ({
-    ...u,
-    coins: Number.isFinite(Number(u.coins)) ? Number(u.coins) : 0
-  }));
-
+  out.requests         = Array.isArray(out.requests)         ? out.requests         : [];
   return out;
 }
-
 
 let state = null;
 let stateUpdatedAt = null;
@@ -514,73 +424,44 @@ let currentUser = null;
 let selectedLoginUser = null;
 
 async function loadData() {
-  // Carga el estado global (users, tasks, rewards, purchases, pendingApprovals, completedToday)
-  const key = 'state'; // clave global compartida
-  const result = await loadKeyFromSheets(key);
-
+  const result = await loadKeyFromSheets('state');
   if (result) {
-    state = normalizeState(result.data);
-    stateUpdatedAt = result.updatedAt || stateUpdatedAt;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    console.log('[DATA] Estado cargado desde Google Sheets ✅');
-    return;
+    const fresh = unwrapSheets(result);
+    if (fresh && fresh.users) {
+      state = normalizeState(fresh);
+      stateUpdatedAt = result.updatedAt;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      console.log('[DATA] ✅ Sheets — coins:', fresh.users.map(u=>`${u.name}:${u.coins}`).join(','));
+      return;
+    }
   }
-
-  // Fallback localStorage
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      state = normalizeState(JSON.parse(raw));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      console.log('[DATA] Estado cargado desde localStorage (fallback) ⚠️');
-    } else {
-      state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA)));
-      console.log('[DATA] Sin datos previos — usando DEFAULT_DATA 🆕');
-    }
-  } catch (e) {
-    state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA)));
-    console.warn('[DATA] Error leyendo localStorage:', e);
-  }
+    if (raw) { state = normalizeState(JSON.parse(raw)); }
+    else { state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA))); }
+  } catch(e) { state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA))); }
 }
-    // Si el estado remoto está vacío pero tenemos algo local,
-    // lo "sembramos" en Sheets para que otros dispositivos lo vean.
-    if (!localStorage.getItem('fcb_seeded_state')) {
-      console.log('[DATA] Sembrando estado en Google Sheets…');
-      saveKeyToSheets('state', state);
-      localStorage.setItem('fcb_seeded_state', '1');
-    }
-
 
 function saveData() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  console.log('[DATA] Guardado en localStorage ✅');
   saveKeyToSheets('state', state);
 }
-
-
-
 
 // ================================================================
 // LOGIN
 // ================================================================
 function renderLoginUsers() {
   const container = document.getElementById('userSelect');
+  if (!container) return;
   container.innerHTML = '';
-  const users = state?.users;
-  if (!Array.isArray(users)) {
-    console.warn('[LOGIN] state.users no disponible, usando DEFAULT_DATA.users');
-    state = normalizeState(state);
-  }
-  (state.users || []).forEach(u => {
+  const users = state?.users || DEFAULT_DATA.users;
+  users.forEach(u => {
     const btn = document.createElement('button');
-    btn.className = 'user-btn';
+    btn.className = 'user-tile';
     btn.innerHTML = `
-      <span class="avatar">${u.avatar}</span>
-      <div class="info">
-        <div>${u.name}</div>
-        <div class="role">${u.role === 'admin' ? '⚙️ Administrador' : '🎮 Jugador'}</div>
-      </div>
-      <span>▶</span>
+      <span class="t-avatar">${u.avatar}</span>
+      <span class="t-name">${u.name}</span>
+      <span class="t-role ${u.role === 'admin' ? 'admin' : 'jugador'}">${u.role === 'admin' ? '⚙️ Admin' : '🎮 Jugador'}</span>
     `;
     btn.onclick = () => selectUser(u);
     container.appendChild(btn);
@@ -601,7 +482,7 @@ function selectUser(user) {
 
 function backToUserSelect() {
   selectedLoginUser = null;
-  document.getElementById('userSelect').style.display = 'flex';
+  document.getElementById('userSelect').style.display = 'grid';
   document.getElementById('pinBox').classList.remove('visible');
 }
 
@@ -616,20 +497,25 @@ async function attemptLogin() {
   if (String(selectedLoginUser.pin) === String(pin)) {
     currentUser = selectedLoginUser;
     playSound('coin');
-    if (currentUser.role === 'admin') {
-      // Cargar requests antes de mostrar panel
+    const btn = document.querySelector('.btn-enter');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ ...'; }
+    showLoading('Cargando perfil...');
+    try {
       await loadRequests();
-      showScreen('adminScreen');
-      renderAdminPanel();
-      startAdminAutoSync();
-      startAdminStateAutoSync();
-    } else {
-      // Cargar requests del usuario para mostrar estado en tienda
-      await loadRequests();
-      showScreen('mainScreen');
-      renderMainScreen();
-      startUserSync();
-    }
+      if (currentUser.role === 'admin') {
+        hideLoading();
+        showScreen('adminScreen');
+        renderAdminPanel();
+        startAdminAutoSync();
+        startAdminStateAutoSync();
+      } else {
+        hideLoading();
+        showScreen('mainScreen');
+        renderMainScreen();
+        startUserSync();
+      }
+    } catch(e) { hideLoading(); }
+    if (btn) { btn.disabled = false; btn.textContent = 'ENTRAR ▶'; }
   } else {
     playSound('error');
     document.getElementById('pinError').style.display = 'block';
@@ -639,91 +525,189 @@ async function attemptLogin() {
 
 function doLogout() {
   stopAdminAutoSync();
+  stopAdminStateAutoSync();
   stopUserSync();
-  currentUser = null;
-  selectedLoginUser = null;
+  currentUser = null; selectedLoginUser = null;
   showScreen('loginScreen');
-  document.getElementById('userSelect').style.display = 'flex';
+  document.getElementById('userSelect').style.display = 'grid';
   document.getElementById('pinBox').classList.remove('visible');
   renderLoginUsers();
 }
 
 // ================================================================
-// SCREENS
+// SCREENS & TABS
 // ================================================================
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
 
+let currentUserTab  = 'inicio';
+let currentAdminTab = 'inicio';
+
+function showTab(tab) {
+  // Oculta todos los paneles del usuario
+  ['inicio','misiones','tienda','historial'].forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.style.display = 'none';
+  });
+  const target = document.getElementById('tab-' + tab);
+  if (target) target.style.display = 'block';
+
+  // Actualiza nav
+  document.querySelectorAll('#mainNav .nav-item').forEach((btn, i) => {
+    const tabs = ['inicio','misiones','tienda','historial'];
+    btn.classList.toggle('active', tabs[i] === tab);
+  });
+  currentUserTab = tab;
+
+  // Render según tab
+  if (tab === 'inicio')    { renderMissionsPreview(); updateWeeklyProgress(); }
+  if (tab === 'misiones')  { renderMissions(); }
+  if (tab === 'tienda')    { renderQuickHistory(); }
+  if (tab === 'historial') { renderHistorialTab(); }
+}
+
+function showAdminTab(tab) {
+  ['inicio','gestion'].forEach(t => {
+    const el = document.getElementById('admin-tab-' + t);
+    if (el) el.style.display = 'none';
+  });
+  const target = document.getElementById('admin-tab-' + tab);
+  if (target) target.style.display = 'block';
+
+  document.querySelectorAll('#adminNav .nav-item').forEach((btn, i) => {
+    const tabs = ['inicio','gestion'];
+    btn.classList.toggle('active', tabs[i] === tab);
+  });
+  currentAdminTab = tab;
+  if (tab === 'gestion') { renderTaskListAdmin(); renderRewardListAdmin(); populateAdminSelects(); }
+}
+
 // ================================================================
-// MAIN USER SCREEN
+// USER MAIN SCREEN
 // ================================================================
 function renderMainScreen() {
-  const user = state.users.find(u => u.id === currentUser.id);
+  const user = state.users.find(u => u.id === currentUser.id) || currentUser;
   currentUser = user;
 
-  // Coin display
-  document.getElementById('coinDisplay').textContent = user.coins;
-  document.getElementById('topbarCenter').innerHTML =
-    `${user.avatar} ${user.name}<br><span style="font-size:9px;color:#cdf;">⭐ MISIONES</span>`;
+  // Avatar & name
+  const el = id => document.getElementById(id);
+  el('mainAvatar').textContent = user.avatar;
+  el('mainName').textContent   = user.name;
+  el('mainRole').textContent   = user.role === 'admin' ? '⚙️ Admin' : '🎮 Jugador';
+  el('coinDisplay').textContent = user.coins;
 
-  // Day label
-  const days = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
-  const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  const now = new Date();
-  document.getElementById('dayLabel').textContent =
-    `${days[now.getDay()]} ${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`;
+  // Hero
+  const hr = new Date().getHours();
+  const greeting = hr < 12 ? '¡Buenos días!' : hr < 18 ? '¡Buenas tardes!' : '¡Buenas noches!';
+  el('heroGreeting').textContent = greeting;
+  el('heroName').textContent     = user.name + ' ' + user.avatar;
+  el('heroCoins').textContent    = user.coins;
 
-  renderMissions();
+  updateWeeklyProgress();
+  renderMissionsPreview();
   updatePendingBadge();
+  showTab('inicio');
 }
 
-function getMyTasks() {
-  return state.tasks.filter(t => t.userId === currentUser.id);
+function updateWeeklyProgress() {
+  const myTasks = state.tasks.filter(t => t.userId === currentUser.id);
+  const done    = myTasks.filter(t => state.completedToday.includes(t.id)).length;
+  const total   = myTasks.length;
+  const pct     = total === 0 ? 0 : Math.round((done / total) * 100);
+
+  const pctEl  = document.getElementById('weeklyPct');
+  const fillEl = document.getElementById('weeklyFill');
+  if (pctEl)  pctEl.textContent    = pct + '%';
+  if (fillEl) fillEl.style.width   = pct + '%';
 }
 
-function renderMissions() {
-  const list = document.getElementById('missionsList');
-  list.innerHTML = '';
-  const myTasks = getMyTasks();
-
+// Preview de misiones en home (max 3)
+function renderMissionsPreview() {
+  const el = document.getElementById('missionsPreview');
+  if (!el) return;
+  const myTasks = state.tasks.filter(t => t.userId === currentUser.id).slice(0, 3);
   if (myTasks.length === 0) {
-    list.innerHTML = '<div style="font-size:11px;color:#cdf;text-align:center;padding:20px;">¡No tienes misiones asignadas! 😴</div>';
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">😴</span><p>Sin misiones asignadas</p></div>`;
     return;
   }
-
-  myTasks.forEach(task => {
-    const isCompleted = state.completedToday.includes(task.id);
-    const pendingEntry = state.pendingApprovals.find(p => p.taskId === task.id && p.userId === currentUser.id);
-    const isPending = !!pendingEntry;
-
-    const card = document.createElement('div');
-    card.className = `mission-card${isCompleted ? ' completed' : ''}${isPending ? ' pending-approval' : ''}`;
-
-    let actionBtn = '';
-    if (isCompleted) {
-      actionBtn = `<button class="btn-check done" disabled>✅</button>`;
-    } else if (isPending) {
-      // Botón para anular el envío por error
-      actionBtn = `<button class="btn-check" style="background:#800;border-color:#500;font-size:10px;" onclick="undoTask('${pendingEntry.id}')" title="Anular envío">↩</button>`;
-    } else {
-      actionBtn = `<button class="btn-check" onclick="submitTask('${task.id}')">☐</button>`;
-    }
-
-    card.innerHTML = `
-      <div class="mission-icon">${task.icon || '⭐'}</div>
+  el.innerHTML = myTasks.map(task => {
+    const done    = state.completedToday.includes(task.id);
+    const pending = !!state.pendingApprovals.find(p => p.taskId === task.id && p.userId === currentUser.id);
+    const stateClass = done ? 'completed' : pending ? 'pending-review' : '';
+    const tag = done ? '<span class="mission-tag done">✅ Lista</span>'
+               : pending ? '<span class="mission-tag pending">⏳ Enviada</span>'
+               : `<span class="mission-tag freq">${task.freq}</span>`;
+    return `<div class="mission-card ${stateClass}">
+      <div class="mission-icon-box">${task.icon || '⭐'}</div>
       <div class="mission-info">
         <div class="mission-name">${task.name}</div>
-        <div class="mission-meta">
-          <span>${isCompleted ? '✅ Aprobada' : isPending ? '⏳ Esperando · toca ↩ para anular' : ''}</span>
-        </div>
+        <div>${tag}</div>
       </div>
-      <div class="mission-coins">🪙${task.coins}</div>
+      <div class="mission-coins-pill">🪙${task.coins}</div>
+    </div>`;
+  }).join('');
+}
+
+// Lista completa de misiones
+function renderMissions() {
+  const el = document.getElementById('missionsList');
+  if (!el) return;
+  const myTasks = state.tasks.filter(t => t.userId === currentUser.id);
+  if (myTasks.length === 0) {
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">😴</span><p>Sin misiones asignadas</p></div>`;
+    return;
+  }
+  el.innerHTML = '';
+  myTasks.forEach(task => {
+    const done    = state.completedToday.includes(task.id);
+    const paEntry = state.pendingApprovals.find(p => p.taskId === task.id && p.userId === currentUser.id);
+    const pending = !!paEntry;
+    const stateClass = done ? 'completed' : pending ? 'pending-review' : '';
+
+    let actionBtn;
+    if (done) {
+      actionBtn = `<button class="btn-mission-action done" disabled>✅</button>`;
+    } else if (pending) {
+      actionBtn = `<button class="btn-mission-action undo" onclick="undoTask('${paEntry.id}')" title="Anular envío">↩</button>`;
+    } else {
+      actionBtn = `<button class="btn-mission-action" onclick="submitTask('${task.id}')">☐</button>`;
+    }
+
+    const tag = done ? '<span class="mission-tag done">✅ Aprobada</span>'
+               : pending ? '<span class="mission-tag pending">⏳ Esperando aprobación</span>'
+               : `<span class="mission-tag freq">${task.freq}</span>`;
+
+    const div = document.createElement('div');
+    div.className = `mission-card ${stateClass}`;
+    div.innerHTML = `
+      <div class="mission-icon-box">${task.icon || '⭐'}</div>
+      <div class="mission-info">
+        <div class="mission-name">${task.name}</div>
+        <div>${tag}</div>
+      </div>
+      <div class="mission-coins-pill">🪙${task.coins}</div>
       ${actionBtn}
     `;
-    list.appendChild(card);
+    el.appendChild(div);
   });
+}
+
+function submitTask(taskId) {
+  const task = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  playSound('submit');
+  state.pendingApprovals.push({
+    id: 'pa_' + Date.now(),
+    taskId: task.id, userId: currentUser.id,
+    userName: currentUser.name, taskName: task.name,
+    coins: task.coins, timestamp: new Date().toISOString()
+  });
+  saveData();
+  renderMissions(); renderMissionsPreview(); updatePendingBadge();
+  showToast(`📨 "${task.name}" enviada para aprobación`);
+  spawnParticles('⭐', null, null);
 }
 
 function undoTask(paId) {
@@ -732,33 +716,8 @@ function undoTask(paId) {
   playSound('error');
   state.pendingApprovals = state.pendingApprovals.filter(p => p.id !== paId);
   saveData();
-  renderMissions();
-  updatePendingBadge();
+  renderMissions(); renderMissionsPreview(); updatePendingBadge();
   showToast(`↩ "${pa.taskName}" anulada`);
-}
-
-function submitTask(taskId) {
-  const task = state.tasks.find(t => t.id === taskId);
-  if (!task) return;
-
-  playSound('submit');
-
-  // Add to pending approvals
-  state.pendingApprovals.push({
-    id: 'pa_' + Date.now(),
-    taskId: task.id,
-    userId: currentUser.id,
-    userName: currentUser.name,
-    taskName: task.name,
-    coins: task.coins,
-    timestamp: new Date().toISOString()
-  });
-
-  saveData();
-  renderMissions();
-  updatePendingBadge();
-  showToast(`📨 "${task.name}" enviada para aprobación!`);
-  spawnParticles('⭐', null, null);
 }
 
 function updatePendingBadge() {
@@ -767,130 +726,51 @@ function updatePendingBadge() {
   if (el) el.innerHTML = count > 0 ? `<span class="badge">${count}</span>` : '';
 }
 
-// ── Polling de novedades para usuario (Mateo) ────────────────────
-let userSyncInterval = null;
-let lastKnownRequestStates = {}; // reqId -> status
-
-function startUserSync() {
-  stopUserSync();
-  // Captura estados actuales como línea base
-  requests.filter(r => r.userId === currentUser?.id).forEach(r => {
-    lastKnownRequestStates[r.id] = r.status;
-  });
-
-  userSyncInterval = setInterval(async () => {
-    if (!currentUser || currentUser.role !== 'user') { stopUserSync(); return; }
-    try {
-      // 1. Verificar requests (compras)
-      const rResult = await loadKeyFromSheets(REQUESTS_KEY);
-      if (rResult) {
-        const fresh = unwrapSheets(rResult);
-        if (Array.isArray(fresh)) {
-          const myFresh = fresh.filter(r => r.userId === currentUser.id);
-          myFresh.forEach(r => {
-            const prev = lastKnownRequestStates[r.id];
-            if (prev && prev !== r.status) {
-              if (r.status === 'approved') { playSound('coin'); showToast(`✅ ¡Aprobado! ${r.rewardIcon} ${r.rewardName}`); spawnParticles('🪙', null, null); }
-              else if (r.status === 'delivered') { playSound('buy'); showToast(`🎁 ¡Entregado! ${r.rewardIcon} ${r.rewardName}`); spawnConfetti(); }
-              else if (r.status === 'rejected') { playSound('error'); showToast(`❌ Rechazado: ${r.rewardName}`); }
-            }
-            lastKnownRequestStates[r.id] = r.status;
-          });
-          requests = fresh;
-          localStorage.setItem('fcb_requests', JSON.stringify(requests));
-        }
-      }
-
-      // 2. Verificar estado global (coins, pendingApprovals)
-      const sResult = await loadKeyFromSheets('state');
-      if (sResult) {
-        const fresh = unwrapSheets(sResult);
-        if (fresh && fresh.users) {
-          const prevCoins = state.users.find(u => u.id === currentUser.id)?.coins || 0;
-          state = normalizeState(fresh);
-          currentUser = state.users.find(u => u.id === currentUser.id);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          const newCoins = currentUser?.coins || 0;
-          if (newCoins > prevCoins) {
-            playSound('coin');
-            showToast(`🪙 +${newCoins - prevCoins} coins! Misión aprobada 🎉`);
-            spawnParticles('🪙', null, null);
-          }
-          document.getElementById('coinDisplay').textContent = newCoins;
-          const mcd = document.getElementById('modalCoinDisplay');
-          if (mcd) mcd.textContent = newCoins;
-        }
-      }
-
-      // 3. Refrescar UI siempre
-      renderMissions();
-      renderStoreRewards();
-      renderPurchaseHistory();
-      updatePendingBadge();
-      setCloudStatus(true);
-    } catch(e) {
-      setCloudStatus(false);
-      console.warn('[USER-SYNC]', e.message);
-    }
-  }, 10000);
-}
-
-function stopUserSync() {
-  if (userSyncInterval) { clearInterval(userSyncInterval); userSyncInterval = null; }
-}
-
 // ================================================================
-// WARP ZONE (Store)
+// STORE (Warp Zone)
 // ================================================================
 function openWarpZone() {
   playSound('coin');
   const user = state.users.find(u => u.id === currentUser.id);
   document.getElementById('modalCoinDisplay').textContent = user.coins;
   renderStoreRewards();
-  renderPurchaseHistory();
+  renderStorePurchaseHistory();
   document.getElementById('warpZoneModal').classList.add('open');
 }
-
-function closeWarpZone() {
-  document.getElementById('warpZoneModal').classList.remove('open');
-}
+function closeWarpZone() { document.getElementById('warpZoneModal').classList.remove('open'); }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', ['tiempo','premios','historial'][i] === tab);
-  });
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.getElementById('tab-' + tab).classList.add('active');
+  const tabs = ['tiempo','premios','store-hist'];
+  document.querySelectorAll('.tab-pill').forEach((b, i) => b.classList.toggle('active', tabs[i] === tab));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  const target = document.getElementById('tab-' + tab);
+  if (target) target.classList.add('active');
 }
 
 function renderStoreRewards() {
   const user = state.users.find(u => u.id === currentUser.id);
-  const tiempo = state.rewards.filter(r => r.type === 'Tiempo');
-  const premios = state.rewards.filter(r => r.type === 'Premio');
+  const byType = { 'Tiempo': document.getElementById('tab-tiempo'), 'Premio': document.getElementById('tab-premios') };
 
-  ['tiempo', 'premios'].forEach(tab => {
-    const list = tab === 'tiempo' ? tiempo : premios;
-    const el = document.getElementById('tab-' + tab);
+  Object.entries(byType).forEach(([type, el]) => {
+    if (!el) return;
+    const list = state.rewards.filter(r => r.type === type);
     if (list.length === 0) {
-      el.innerHTML = '<div style="font-size:10px;color:#aaa;padding:10px;">No hay recompensas en esta categoría</div>';
+      el.innerHTML = `<div class="empty-box"><span class="e-icon">🏪</span><p>No hay recompensas aquí</p></div>`;
       return;
     }
     el.innerHTML = list.map(r => {
-      const hasPending  = requests.some(req => req.userId === user.id && req.rewardId === r.id && req.status === 'pending');
-      const canAfford   = user.coins >= r.cost;
-      const btnDisabled = (hasPending || !canAfford) ? 'disabled' : '';
-      const btnLabel    = hasPending  ? '⏳ PENDIENTE'
-                        : !canAfford  ? '🔒 SIN COINS'
-                        :               '📨 SOLICITAR';
-      return `<div class="reward-card">
-        <div class="reward-icon">${r.icon || '🏆'}</div>
-        <div class="reward-info">
-          <div class="reward-name">${r.name}</div>
-          <div class="reward-cost" style="color:${canAfford ? 'var(--coin)' : '#f88'}">🪙 ${r.cost} coins${!canAfford ? ` (te faltan ${r.cost - user.coins})` : ''}</div>
-          <div class="reward-type">${r.type === 'Tiempo' ? '⏱️ Tiempo de pantalla' : '🎁 Premio'}</div>
+      const hasPending = requests.some(req => req.userId === user.id && req.rewardId === r.id && req.status === 'pending');
+      const canAfford  = user.coins >= r.cost;
+      const disabled   = (hasPending || !canAfford) ? 'disabled' : '';
+      const label      = hasPending ? '⏳ Pendiente' : !canAfford ? `🔒 Faltan ${r.cost - user.coins}` : '📨 Solicitar';
+      return `<div class="reward-row">
+        <div class="reward-icon-box">${r.icon || '🏆'}</div>
+        <div class="reward-details">
+          <div class="reward-row-name">${r.name}</div>
+          <div class="reward-row-cost ${canAfford ? '' : 'cant'}">🪙 ${r.cost} monedas</div>
         </div>
-        <button class="btn-buy" ${btnDisabled} data-reward-id="${r.id}" onclick="buyReward('${r.id}')">
-          ${btnLabel}
+        <button class="btn-buy" ${disabled} data-reward-id="${r.id}" onclick="buyReward('${r.id}')">
+          ${label}
         </button>
       </div>`;
     }).join('');
@@ -899,42 +779,88 @@ function renderStoreRewards() {
 
 async function buyReward(rewardId) {
   const reward = state.rewards.find(r => r.id === rewardId);
-  const user = state.users.find(u => u.id === currentUser.id);
+  const user   = state.users.find(u => u.id === currentUser.id);
   if (!reward || !user) return;
-
-  // Bloquear botón temporalmente para evitar doble envío
   const btn = document.querySelector(`[data-reward-id="${rewardId}"]`);
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
-
   playSound('submit');
   const ok = await addRequest(reward, user);
-
   if (ok) {
     spawnParticles('⭐', null, null);
-    showToast(`📨 Solicitud enviada: ${reward.name}\n¡Espera aprobación del Admin!`);
-    renderStoreRewards();
-    renderPurchaseHistory();
+    showToast(`📨 Solicitud enviada: ${reward.name}`);
+    renderStoreRewards(); renderStorePurchaseHistory();
   }
-
-  // Re-habilitar tras 2s
   setTimeout(() => { if (btn) { btn.disabled = false; renderStoreRewards(); } }, 2000);
 }
 
-function renderPurchaseHistory() {
-  const myRequests = requests.filter(r => r.userId === currentUser.id);
-  const el = document.getElementById('tab-historial');
-  if (myRequests.length === 0) {
-    el.innerHTML = '<div style="font-size:10px;color:#aaa;padding:10px;">Aún no has solicitado nada 🛒</div>';
+function renderStorePurchaseHistory() {
+  const el = document.getElementById('tab-store-hist');
+  if (!el) return;
+  const mine = requests.filter(r => r.userId === currentUser.id);
+  if (mine.length === 0) {
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">🛒</span><p>Aún no has solicitado nada</p></div>`;
     return;
   }
-  const statusLabel = { pending:'⏳ Pendiente', approved:'✅ Aprobado', delivered:'🎁 Entregado', rejected:'❌ Rechazado' };
-  const statusColor = { pending:'#ffd700', approved:'#9fc', delivered:'#4af', rejected:'#f88' };
-  el.innerHTML = myRequests.slice(0, 20).map(r => {
+  const icons = { pending:'⏳', approved:'✅', delivered:'🎁', rejected:'❌' };
+  const labels = { pending:'Pendiente', approved:'Aprobado', delivered:'Entregado', rejected:'Rechazado' };
+  el.innerHTML = mine.slice(0, 20).map(r => {
     const d = new Date(r.createdAt);
-    const fmt = `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}`;
-    return `<div class="purchase-item">
-      <span>${r.rewardIcon} ${r.rewardName}</span>
-      <span style="color:${statusColor[r.status]||'#fff'}">${statusLabel[r.status]||r.status} · 🪙${r.cost} · ${fmt}</span>
+    return `<div class="hist-item">
+      <div class="hist-dot ${r.status}">${r.rewardIcon}</div>
+      <div class="hist-info">
+        <div class="hist-name">${r.rewardName}</div>
+        <div class="hist-sub">🪙${r.cost} · ${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}</div>
+      </div>
+      <span class="hist-badge ${r.status}">${icons[r.status]} ${labels[r.status]||r.status}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderQuickHistory() {
+  const el = document.getElementById('quickHistory');
+  if (!el) return;
+  renderStorePurchaseHistory();
+  // Muestra los últimos 5 en el tab-tienda también
+  const mine = requests.filter(r => r.userId === currentUser.id).slice(0, 5);
+  if (mine.length === 0) {
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">🛒</span><p>Aún no has solicitado nada</p></div>`;
+    return;
+  }
+  const icons  = { pending:'⏳', approved:'✅', delivered:'🎁', rejected:'❌' };
+  const labels = { pending:'Pendiente', approved:'Aprobado', delivered:'Entregado', rejected:'Rechazado' };
+  el.innerHTML = mine.map(r => {
+    const d = new Date(r.createdAt);
+    return `<div class="hist-item">
+      <div class="hist-dot ${r.status}">${r.rewardIcon}</div>
+      <div class="hist-info">
+        <div class="hist-name">${r.rewardName}</div>
+        <div class="hist-sub">🪙${r.cost} · ${d.getDate()}/${d.getMonth()+1}</div>
+      </div>
+      <span class="hist-badge ${r.status}">${icons[r.status]} ${labels[r.status]||r.status}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderHistorialTab() {
+  const el = document.getElementById('historialList');
+  if (!el) return;
+  // Combina misiones completadas + requests
+  const mine = requests.filter(r => r.userId === currentUser.id);
+  if (mine.length === 0) {
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">📜</span><p>No hay actividad todavía</p></div>`;
+    return;
+  }
+  const icons  = { pending:'⏳', approved:'✅', delivered:'🎁', rejected:'❌' };
+  const labels = { pending:'Pendiente', approved:'Aprobado', delivered:'Entregado', rejected:'Rechazado' };
+  el.innerHTML = mine.map(r => {
+    const d = new Date(r.createdAt);
+    return `<div class="hist-item">
+      <div class="hist-dot ${r.status}">${r.rewardIcon}</div>
+      <div class="hist-info">
+        <div class="hist-name">${r.rewardName}</div>
+        <div class="hist-sub">🪙${r.cost} · ${d.toLocaleDateString('es-CO')}</div>
+      </div>
+      <span class="hist-badge ${r.status}">${icons[r.status]} ${labels[r.status]||r.status}</span>
     </div>`;
   }).join('');
 }
@@ -943,75 +869,57 @@ function renderPurchaseHistory() {
 // ADMIN PANEL
 // ================================================================
 function renderAdminPanel() {
-  renderPendingApprovals();   // tareas (existente)
-  renderAdminRequestsPanel(); // solicitudes de compra (nuevo)
+  // Actualiza nombre en topbar
+  const nameEl = document.getElementById('adminName');
+  if (nameEl) nameEl.textContent = currentUser?.name || 'Admin';
+
+  renderPendingApprovals();
+  renderAdminRequestsPanel();
   renderUserStats();
-  renderTaskListAdmin();
-  renderRewardListAdmin();
-  populateAdminSelects();
   updateAdminBadge();
   updateAdminRequestsBadge();
-  makeAdminCollapsible();
+  initAdminCollapsible();
 }
 
-function makeAdminCollapsible() {
-  const sections = document.querySelectorAll('#adminScreen .admin-section');
-  sections.forEach(sec => {
-    // Evita duplicar wrappers
-    if (sec.querySelector(':scope > .admin-body')) return;
-
-    const title = sec.querySelector(':scope > .admin-section-title');
+function initAdminCollapsible() {
+  document.querySelectorAll('#adminScreen .admin-section').forEach(sec => {
+    if (sec.dataset.collapsible) return;
+    sec.dataset.collapsible = '1';
+    const title = sec.querySelector('.admin-sec-title');
     if (!title) return;
-
-    // Crea wrapper para el contenido
-    const body = document.createElement('div');
-    body.className = 'admin-body';
-
-    // Mueve todos los nodos después del título
-    const nodes = [];
-    let n = title.nextSibling;
-    while (n) { nodes.push(n); n = n.nextSibling; }
-    nodes.forEach(node => body.appendChild(node));
-    sec.appendChild(body);
-
-    // Click para colapsar
     title.addEventListener('click', (e) => {
-      // Si el click fue en un botón dentro del título (ej: SYNC), no colapses
-      const isButton = e.target.closest('button');
-      if (isButton) return;
+      if (e.target.closest('button')) return;
       sec.classList.toggle('collapsed');
     });
+    // Colapsar por defecto (excepto tareas y solicitudes)
+    const text = title.textContent || '';
+    const keepOpen = text.includes('Tareas pendientes') || text.includes('Solicitudes de tienda') || text.includes('Monedas');
+    if (!keepOpen) sec.classList.add('collapsed');
   });
 }
-
 
 function updateAdminBadge() {
   const count = state.pendingApprovals.length;
   const el = document.getElementById('pendingBadgeAdmin');
   if (el) el.innerHTML = count > 0 ? `<span class="badge">${count}</span>` : '';
 }
-
 function updateAdminRequestsBadge() {
   const count = requests.filter(r => r.status === 'pending' || r.status === 'approved').length;
   const el = document.getElementById('requestsBadgeAdmin');
   if (el) el.innerHTML = count > 0 ? `<span class="badge">${count}</span>` : '';
 }
 
-// ── Panel de solicitudes de compra ───────────────────────────────
 function renderAdminRequestsPanel() {
   const el = document.getElementById('adminRequestsList');
   if (!el) return;
   const active = requests.filter(r => r.status !== 'delivered' && r.status !== 'rejected');
-  const done   = requests.filter(r => r.status === 'delivered' || r.status === 'rejected').slice(0, 10);
-
+  const done   = requests.filter(r => r.status === 'delivered' || r.status === 'rejected').slice(0, 8);
   if (active.length === 0 && done.length === 0) {
-    el.innerHTML = '<div style="font-size:10px;color:#aaa;">No hay solicitudes aún 🎉</div>';
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">🎉</span><p>No hay solicitudes</p></div>`;
     return;
   }
-
-  const statusColor = { pending:'#ffd700', approved:'#9fc', delivered:'#4af', rejected:'#f88' };
-  const statusLabel = { pending:'⏳ Pendiente', approved:'✅ Aprobado', delivered:'🎁 Entregado', rejected:'❌ Rechazado' };
-
+  const labels = { pending:'⏳ Pendiente', approved:'✅ Aprobado', delivered:'🎁 Entregado', rejected:'❌ Rechazado' };
+  const colors = { pending:'var(--gold-dark)', approved:'var(--green-dark)', delivered:'var(--accent)', rejected:'var(--red)' };
   const renderReq = (r) => {
     const d = new Date(r.createdAt);
     const fmt = `${d.getDate()}/${d.getMonth()+1} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
@@ -1020,44 +928,49 @@ function renderAdminRequestsPanel() {
     let actions = '';
     if (r.status === 'pending') {
       actions = `
-        <button class="btn-reject" onclick="rejectRequest('${r.id}')">✕</button>
-        <button class="btn-approve" ${canAfford ? '' : 'disabled title="Sin coins"'} onclick="approveRequest('${r.id}')">✓</button>`;
+        <button class="btn-no"  onclick="rejectRequest('${r.id}')">✕</button>
+        <button class="btn-ok"  ${canAfford ? '' : 'disabled title="Sin coins"'} onclick="approveRequest('${r.id}')">✓</button>`;
     } else if (r.status === 'approved') {
-      actions = `<button class="btn-approve" style="font-size:11px;padding:6px;" onclick="deliverRequest('${r.id}')">🎁 DAR</button>`;
+      actions = `<button class="btn-give" onclick="deliverRequest('${r.id}')">🎁 Dar</button>`;
     }
-    return `<div class="approval-item">
-      <div class="approval-info">
-        <div class="approval-user">${r.userAvatar || ''} ${r.userName}</div>
-        <div>${r.rewardIcon} ${r.rewardName} · 🪙${r.cost}</div>
-        <div style="color:${statusColor[r.status]}">${statusLabel[r.status]} · ${fmt}</div>
-        ${r.status === 'pending' && !canAfford ? '<div style="color:#f88;font-size:9px;">⚠️ Sin coins suficientes</div>' : ''}
+    return `<div class="appr-item">
+      <div class="appr-avatar">${r.userAvatar || '👤'}</div>
+      <div class="appr-info">
+        <div class="appr-user">${r.userName}</div>
+        <div class="appr-detail">${r.rewardIcon} ${r.rewardName} · 🪙${r.cost}</div>
+        <div class="appr-meta" style="color:${colors[r.status]}">${labels[r.status]||r.status} · ${fmt}</div>
+        ${r.status === 'pending' && !canAfford ? '<div class="appr-meta" style="color:var(--red)">⚠️ Sin coins suficientes</div>' : ''}
       </div>
-      <div style="display:flex;gap:4px;">${actions}</div>
+      <div class="appr-actions">${actions}</div>
     </div>`;
   };
-
   el.innerHTML =
     (active.length ? active.map(renderReq).join('') : '') +
-    (done.length ? `<div style="font-size:9px;color:#888;margin:8px 0 4px;">— Historial reciente —</div>` + done.map(renderReq).join('') : '');
+    (done.length ? `<div style="font-size:10px;color:var(--text-3);margin:10px 0 6px;font-weight:700;">— Historial reciente —</div>` + done.map(renderReq).join('') : '');
 }
 
 function renderPendingApprovals() {
   const el = document.getElementById('pendingApprovals');
+  if (!el) return;
   if (state.pendingApprovals.length === 0) {
-    el.innerHTML = '<div style="font-size:10px;color:#aaa;">No hay tareas pendientes 🎉</div>';
+    el.innerHTML = `<div class="empty-box"><span class="e-icon">🎉</span><p>No hay tareas pendientes</p></div>`;
     return;
   }
   el.innerHTML = state.pendingApprovals.map(p => {
     const d = new Date(p.timestamp);
     const fmt = `${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
-    return `<div class="approval-item">
-      <div class="approval-info">
-        <div class="approval-user">${p.userName}</div>
-        <div>${p.taskName}</div>
-        <div>🪙 ${p.coins} coins · ${fmt}</div>
+    const u = state.users.find(u => u.id === p.userId);
+    return `<div class="appr-item">
+      <div class="appr-avatar">${u?.avatar || '👤'}</div>
+      <div class="appr-info">
+        <div class="appr-user">${p.userName}</div>
+        <div class="appr-detail">${p.taskName}</div>
+        <div class="appr-meta">🪙${p.coins} · ${fmt}</div>
       </div>
-      <button class="btn-reject" onclick="rejectTask('${p.id}')">✕</button>
-      <button class="btn-approve" onclick="approveTask('${p.id}')">✓</button>
+      <div class="appr-actions">
+        <button class="btn-no"  onclick="rejectTask('${p.id}')">✕</button>
+        <button class="btn-ok"  onclick="approveTask('${p.id}')">✓</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -1066,80 +979,66 @@ function approveTask(paId) {
   const pa = state.pendingApprovals.find(p => p.id === paId);
   if (!pa) return;
   playSound('coin');
-
-  const userIdx = state.users.findIndex(u => u.id === pa.userId);
-  if (userIdx >= 0) state.users[userIdx].coins += pa.coins;
-
+  const idx = state.users.findIndex(u => u.id === pa.userId);
+  if (idx >= 0) state.users[idx].coins += pa.coins;
   state.completedToday.push(pa.taskId);
   state.pendingApprovals = state.pendingApprovals.filter(p => p.id !== paId);
-
-  saveData();
-  renderPendingApprovals();
-  renderUserStats();
-  updateAdminBadge();
-  showToast(`✅ Aprobada: "${pa.taskName}" → +${pa.coins}🪙 a ${pa.userName}`);
+  saveData(); renderPendingApprovals(); renderUserStats(); updateAdminBadge();
+  showToast(`✅ "${pa.taskName}" → +${pa.coins}🪙 a ${pa.userName}`);
   spawnParticles('🪙', null, null);
 }
-
 function rejectTask(paId) {
   const pa = state.pendingApprovals.find(p => p.id === paId);
   if (!pa) return;
   playSound('error');
   state.pendingApprovals = state.pendingApprovals.filter(p => p.id !== paId);
-  saveData();
-  renderPendingApprovals();
-  updateAdminBadge();
+  saveData(); renderPendingApprovals(); updateAdminBadge();
   showToast(`❌ Rechazada: "${pa.taskName}"`);
 }
 
 function renderUserStats() {
   const el = document.getElementById('userStats');
+  if (!el) return;
   el.innerHTML = state.users.map(u => `
-    <div class="user-stat-card">
-      <span class="uavatar">${u.avatar}</span>
-      <div class="user-stat-info">
-        <div style="color:var(--coin);font-size:11px;">${u.name}</div>
-        <div>${u.role === 'admin' ? '⚙️ Admin' : '🎮 Jugador'}</div>
+    <div class="ustat-card">
+      <div class="ustat-avatar">${u.avatar}</div>
+      <div class="ustat-info">
+        <div class="ustat-name">${u.name}</div>
+        <div class="ustat-role">${u.role === 'admin' ? '⚙️ Admin' : '🎮 Jugador'}</div>
       </div>
-      <span class="user-stat-coins">🪙${u.coins}</span>
+      <div class="ustat-coins">🪙 ${u.coins}</div>
     </div>
   `).join('');
 }
 
 function populateAdminSelects() {
-  const userSel = document.getElementById('adjUserSel');
-  const taskUserSel = document.getElementById('newTaskUser');
-  const players = state.users.filter(u => u.role === 'user');
-
-  userSel.innerHTML = state.users.map(u =>
-    `<option value="${u.id}">${u.avatar} ${u.name}</option>`).join('');
-  taskUserSel.innerHTML = players.map(u =>
-    `<option value="${u.id}">${u.avatar} ${u.name}</option>`).join('');
+  const adjSel     = document.getElementById('adjUserSel');
+  const taskUsrSel = document.getElementById('newTaskUser');
+  if (adjSel)     adjSel.innerHTML     = state.users.map(u => `<option value="${u.id}">${u.avatar} ${u.name}</option>`).join('');
+  if (taskUsrSel) taskUsrSel.innerHTML = state.users.map(u => `<option value="${u.id}">${u.avatar} ${u.name}</option>`).join('');
 }
 
 function adjustCoins(dir) {
   const userId = document.getElementById('adjUserSel').value;
   const amount = parseInt(document.getElementById('adjAmount').value) || 0;
   if (amount <= 0) { showToast('⚠️ Ingresa una cantidad válida'); return; }
-
-  const userIdx = state.users.findIndex(u => u.id === userId);
-  if (userIdx < 0) return;
-  state.users[userIdx].coins = Math.max(0, state.users[userIdx].coins + (dir * amount));
-  saveData();
-  renderUserStats();
-  playSound('coin');
-  showToast(`💰 ${dir > 0 ? '+' : '-'}${amount} coins a ${state.users[userIdx].name}`);
+  const idx = state.users.findIndex(u => u.id === userId);
+  if (idx < 0) return;
+  state.users[idx].coins = Math.max(0, state.users[idx].coins + (dir * amount));
+  saveData(); renderUserStats(); playSound('coin');
+  showToast(`${dir > 0 ? '➕' : '➖'} ${amount} coins a ${state.users[idx].name}`);
 }
 
 function renderTaskListAdmin() {
   const el = document.getElementById('taskListAdmin');
+  if (!el) return;
   el.innerHTML = state.tasks.map(t => {
-    const assignedUser = state.users.find(u => u.id === t.userId);
-    return `<div class="task-admin-item">
-      <span class="task-ico">${t.icon || '⭐'}</span>
-      <div class="task-admin-info">
-        <div style="color:var(--coin)">${t.name}</div>
-        <div>${assignedUser?.avatar || ''} ${assignedUser?.name || t.userId} · ${t.freq} · 🪙${t.coins}</div>
+    const u = state.users.find(u => u.id === t.userId);
+    return `<div class="list-item">
+      <span class="list-item-icon">${t.icon || '⭐'}</span>
+      <div class="list-item-info">
+        <div class="list-item-name">${t.name}</div>
+        <div class="list-item-meta">${u?.avatar || ''} ${u?.name || t.userId} · ${t.freq} · 🪙${t.coins}</div>
       </div>
       <button class="btn-del" onclick="deleteTask('${t.id}')">🗑</button>
     </div>`;
@@ -1147,46 +1046,37 @@ function renderTaskListAdmin() {
 }
 
 function addTask() {
-  const name = document.getElementById('newTaskName').value.trim();
-  const icon = document.getElementById('newTaskIcon').value.trim() || '⭐';
-  const coins = parseInt(document.getElementById('newTaskCoins').value) || 1;
-  const freq = document.getElementById('newTaskFreq').value;
+  const name   = document.getElementById('newTaskName').value.trim();
+  const icon   = document.getElementById('newTaskIcon').value.trim()  || '⭐';
+  const coins  = parseInt(document.getElementById('newTaskCoins').value) || 1;
+  const freq   = document.getElementById('newTaskFreq').value;
   const userId = document.getElementById('newTaskUser').value;
-
-  if (!name) { showToast('⚠️ Escribe el nombre de la tarea'); return; }
-
-  state.tasks.push({
-    id: 't_' + Date.now(),
-    userId, name, icon, coins, freq
-  });
-  saveData();
-  renderTaskListAdmin();
+  if (!name) { showToast('⚠️ Escribe el nombre de la misión'); return; }
+  state.tasks.push({ id: 't_' + Date.now(), userId, name, icon, coins, freq });
+  saveData(); renderTaskListAdmin();
   document.getElementById('newTaskName').value = '';
   document.getElementById('newTaskIcon').value = '';
   document.getElementById('newTaskCoins').value = '';
-  playSound('buy');
-  showToast(`✅ Misión agregada: ${name}`);
+  playSound('buy'); showToast(`✅ Misión agregada: ${name}`);
 }
 
 function deleteTask(taskId) {
   state.tasks = state.tasks.filter(t => t.id !== taskId);
   state.pendingApprovals = state.pendingApprovals.filter(p => p.taskId !== taskId);
-  state.completedToday = state.completedToday.filter(id => id !== taskId);
-  saveData();
-  renderTaskListAdmin();
-  renderPendingApprovals();
-  updateAdminBadge();
+  state.completedToday   = state.completedToday.filter(id => id !== taskId);
+  saveData(); renderTaskListAdmin(); renderPendingApprovals(); updateAdminBadge();
   showToast('🗑 Misión eliminada');
 }
 
 function renderRewardListAdmin() {
   const el = document.getElementById('rewardListAdmin');
+  if (!el) return;
   el.innerHTML = state.rewards.map(r => `
-    <div class="task-admin-item">
-      <span class="task-ico">${r.icon || '🏆'}</span>
-      <div class="task-admin-info">
-        <div style="color:var(--coin)">${r.name}</div>
-        <div>${r.type} · 🪙${r.cost}</div>
+    <div class="list-item">
+      <span class="list-item-icon">${r.icon || '🏆'}</span>
+      <div class="list-item-info">
+        <div class="list-item-name">${r.name}</div>
+        <div class="list-item-meta">${r.type} · 🪙${r.cost}</div>
       </div>
       <button class="btn-del" onclick="deleteReward('${r.id}')">🗑</button>
     </div>
@@ -1198,55 +1088,27 @@ function addReward() {
   const icon = document.getElementById('newRewardIcon').value.trim() || '🏆';
   const cost = parseInt(document.getElementById('newRewardCost').value) || 10;
   const type = document.getElementById('newRewardType').value;
-
   if (!name) { showToast('⚠️ Escribe el nombre de la recompensa'); return; }
-
   state.rewards.push({ id: 'r_' + Date.now(), name, icon, cost, type });
-  saveData();
-  renderRewardListAdmin();
+  saveData(); renderRewardListAdmin();
   document.getElementById('newRewardName').value = '';
   document.getElementById('newRewardIcon').value = '';
   document.getElementById('newRewardCost').value = '';
-  playSound('buy');
-  showToast(`🏆 Recompensa agregada: ${name}`);
+  playSound('buy'); showToast(`🏆 Recompensa: ${name}`);
 }
 
 function deleteReward(rewardId) {
   state.rewards = state.rewards.filter(r => r.id !== rewardId);
-  saveData();
-  renderRewardListAdmin();
+  saveData(); renderRewardListAdmin();
   showToast('🗑 Recompensa eliminada');
 }
 
-// Reset diario SIN borrar coins: primero trae el estado más reciente de la nube
-// para no pisar monedas acumuladas por otros dispositivos.
-async function resetDailyTasks() {
-  if (!confirm('¿Reiniciar misiones del día? Esto limpiará las tareas completadas.')) return;
-
-  // 1) Intenta refrescar desde nube (si hay algo más nuevo, úsalo)
-  try {
-    const remote = await loadKeyFromSheets('state');
-    if (remote && remote.data) {
-      const remoteUpdatedAt = remote.updatedAt;
-      // Si no tenemos updatedAt local o el remoto es más reciente, adopta el remoto
-      if (!stateUpdatedAt || (remoteUpdatedAt && remoteUpdatedAt !== stateUpdatedAt)) {
-        state = normalizeState(remote.data);
-        stateUpdatedAt = remoteUpdatedAt || stateUpdatedAt;
-      }
-    }
-  } catch (_) {
-    // Si falla, seguimos con estado local (no queremos bloquear el reset)
-  }
-
-  // 2) Aplica el reset SOLO a lo diario
-  state.completedToday = [];
-  state.pendingApprovals = [];
+function resetDailyTasks() {
+  if (!confirm('¿Reiniciar misiones del día?')) return;
+  state.completedToday = []; state.pendingApprovals = [];
   state.lastReset = new Date().toISOString();
-
-  // 3) Guarda (esto ahora ya incluye los coins correctos)
-  saveData();
-  renderAdminPanel();
-  showToast('🔄 ¡Misiones del día reiniciadas!');
+  saveData(); renderAdminPanel();
+  showToast('🔄 Misiones reiniciadas');
 }
 
 function exportData() {
@@ -1258,10 +1120,23 @@ function exportData() {
 }
 
 // ================================================================
-// EFFECTS
+// LOADING / UI HELPERS
 // ================================================================
+function showLoading(msg) {
+  const el = document.getElementById('loadingOverlay');
+  if (!el) return;
+  const m = document.getElementById('loadingMsg');
+  if (m) m.textContent = msg || 'Cargando...';
+  el.classList.add('visible');
+}
+function hideLoading() {
+  const el = document.getElementById('loadingOverlay');
+  if (el) el.classList.remove('visible');
+}
+
 function showToast(msg) {
   const el = document.getElementById('toast');
+  if (!el) return;
   el.textContent = msg;
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 2800);
@@ -1269,68 +1144,49 @@ function showToast(msg) {
 
 function spawnParticles(emoji, x, y) {
   const cx = x || window.innerWidth / 2;
-  const cy = y || window.innerHeight / 2;
+  const cy = y || window.innerHeight / 3;
   for (let i = 0; i < 8; i++) {
     const p = document.createElement('div');
     p.className = 'particle';
     p.textContent = emoji;
     const angle = (i / 8) * Math.PI * 2;
-    const dist = 60 + Math.random() * 60;
-    p.style.cssText = `left:${cx}px;top:${cy}px;--tx:${Math.cos(angle)*dist}px;--ty:${Math.sin(angle)*dist}px;animation-duration:${0.6 + Math.random()*0.4}s;`;
+    const dist  = 60 + Math.random() * 60;
+    p.style.cssText = `left:${cx}px;top:${cy}px;--tx:${Math.cos(angle)*dist}px;--ty:${Math.sin(angle)*dist}px;animation-duration:${0.6+Math.random()*0.4}s;`;
     document.body.appendChild(p);
     setTimeout(() => p.remove(), 1200);
   }
 }
 
 function spawnConfetti() {
-  const colors = ['#FFD700','#FF6B6B','#5C94FC','#4CAF50','#FF69B4','#FFA500'];
+  const colors = ['#FFD700','#FF6B6B','#5C6EF8','#22C97A','#FF69B4','#FB923C'];
   for (let i = 0; i < 30; i++) {
     const c = document.createElement('div');
-    c.className = 'confetti-piece';
+    c.className = 'confetti-bit';
     c.style.cssText = `
-      left: ${Math.random() * 100}vw;
-      top: -20px;
-      background: ${colors[Math.floor(Math.random() * colors.length)]};
-      width: ${6 + Math.random() * 8}px;
-      height: ${6 + Math.random() * 8}px;
-      animation-duration: ${1 + Math.random() * 2}s;
-      animation-delay: ${Math.random() * 0.5}s;
+      left:${Math.random()*100}vw; top:-20px;
+      background:${colors[i % colors.length]};
+      width:${6+Math.random()*8}px; height:${6+Math.random()*8}px;
+      animation-duration:${1+Math.random()*2}s;
+      animation-delay:${Math.random()*0.5}s;
     `;
     document.body.appendChild(c);
     setTimeout(() => c.remove(), 3000);
   }
 }
 
-function showTab(tab) { /* placeholder for bottom nav */ }
-
 // ================================================================
 // INIT
 // ================================================================
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1) Carga rápida desde localStorage (no bloquea el login)
+  // 1. Carga rápida desde localStorage para mostrar login de inmediato
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) state = normalizeState(JSON.parse(raw));
-    else state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA)));
-  } catch (e) {
-    console.warn('[INIT] Fallback a DEFAULT_DATA por error leyendo localStorage', e);
+    state = raw ? normalizeState(JSON.parse(raw)) : normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA)));
+  } catch(e) {
     state = normalizeState(JSON.parse(JSON.stringify(DEFAULT_DATA)));
   }
+  renderLoginUsers();
 
-  renderLoginUsers(); // login inmediato
-
-  // Close modal on outside click
-  document.getElementById('warpZoneModal').addEventListener('click', function(e) {
-    if (e.target === this) closeWarpZone();
-  });
-
-  // 2) Sincroniza con Sheets en segundo plano (sin bloquear clicks)
-  loadData().then(() => {
-    renderLoginUsers(); // refresca lista/estado si cambió
-  });
-
-  // Register Service Worker for PWA (opcional)
-  if ('serviceWorker' in navigator) {
-    // navigator.serviceWorker.register('/sw.js');
-  }
+  // 2. Sincroniza con Sheets en background
+  loadData().then(() => renderLoginUsers());
 });
