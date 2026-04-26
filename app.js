@@ -1,6 +1,24 @@
 // ================================================================
+// SUPABASE CONFIG — MISIÓN MAKAMBÚ
+// ================================================================
+const SUPABASE_URL = 'https://nhqchhiwglulgraowvho.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ocWNoaGl3Z2x1bGdyYW93dmhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMzYzMjAsImV4cCI6MjA5MjgxMjMyMH0.m1-knqCFAOutGlKP4oCVtGb_GVheJurf_rfvUYDppgo';
+
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+async function testSupabaseConnection() {
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('*');
+
+  console.log('SUPABASE TEST:', { data, error });
+}
+
+testSupabaseConnection();
+// ================================================================
 // AUDIO ENGINE
 // ================================================================
+
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 let audioCtx = null;
 function getAudioCtx() { if (!audioCtx) audioCtx = new AudioCtx(); return audioCtx; }
