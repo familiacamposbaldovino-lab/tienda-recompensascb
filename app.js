@@ -312,8 +312,20 @@ async function submitTask(taskId) {
   playSound('submit'); showToast(`📨 ${task.name} enviada`); spawnParticles('⭐'); await refreshAll();
 }
 async function undoTask(submissionId) {
-  // Sin delete policy: se marca como rechazada por el propio jugador no está permitido con RLS actual.
-  showToast('⏳ Pide a tu acudiente rechazarla si fue enviada por error');
+  if (!submissionId) return;
+
+  const { error } = await supabaseClient
+    .from('task_submissions')
+    .delete()
+    .eq('id', submissionId)
+    .eq('player_id', currentUser.id)
+    .eq('status', 'pending');
+
+  if (error) return fail(error, 'No se pudo cancelar la misión');
+
+  playSound('error');
+  showToast('↩ Misión cancelada');
+  await refreshAll();
 }
 function updatePendingBadge() {
   const count = taskSubmissions.filter(s => s.player_id === currentUser?.id && s.status === 'pending').length;
