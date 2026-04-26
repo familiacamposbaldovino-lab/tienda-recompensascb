@@ -7,36 +7,40 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#5C6EF8">
-  <title>🍄 Familia Campos Baldovino</title>
+  <title>🎋 Misión Makambú</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="app">
 
   <!-- ═══════════════════════════════════════════
-       LOGIN
+       LOGIN SUPABASE — MISIÓN MAKAMBÚ
   ═══════════════════════════════════════════ -->
   <div id="loginScreen" class="screen active">
     <div class="login-card">
       <div class="login-header">
-        <span class="login-logo-emoji">🍄</span>
-        <div class="login-title">FAMILIA<br>CAMPOS BALDOVINO</div>
-        <div class="login-sub">¿Quién eres?</div>
+        <span class="login-logo-emoji">🎋</span>
+        <div class="login-title">MISIÓN<br>MAKAMBÚ</div>
+        <div class="login-sub">Hábitos para familias modernas</div>
       </div>
 
-      <div id="userSelect"></div>
+      <form id="loginForm" class="login-form" onsubmit="handleSupabaseLogin(event)">
+        <label class="login-label" for="emailInput">Correo</label>
+        <input id="emailInput" class="login-input" type="email" autocomplete="email" placeholder="correo@ejemplo.com" required>
 
-      <div id="pinBox">
-        <div class="pin-who">Hola, <strong id="pinUserLabel"></strong> 👋</div>
-        <input id="pinInput" class="pin-input-field" type="password"
-               inputmode="numeric" maxlength="4" placeholder="••••"
-               oninput="handlePinInput()">
-        <div id="pinError">PIN incorrecto ❌</div>
-        <button class="btn-enter" onclick="attemptLogin()">ENTRAR ▶</button>
-        <button class="btn-back-pin" onclick="backToUserSelect()">← Volver</button>
+        <label class="login-label" for="passwordInput">Contraseña</label>
+        <input id="passwordInput" class="login-input" type="password" autocomplete="current-password" placeholder="••••••••" required>
+
+        <div id="loginError" class="login-error"></div>
+        <button id="loginButton" class="btn-enter" type="submit">ENTRAR ▶</button>
+      </form>
+
+      <div class="login-note">
+        Acceso privado para acudientes y jugadores.
       </div>
     </div>
   </div>
+
 
 
   <!-- ═══════════════════════════════════════════
@@ -184,6 +188,10 @@
         <div class="admin-uname" id="adminName">Cristian</div>
       </div>
       <div class="admin-topbar-right">
+        <div class="topbar-coins" style="font-size:13px;">
+          <span class="c-icon">🪙</span>
+          <span class="c-val" id="adminCoinDisplay">0</span>
+        </div>
         <span id="cloudStatus">☁️ OK</span>
         <button class="btn-icon" onclick="doLogout()">🚪</button>
       </div>
@@ -210,7 +218,6 @@
         <div class="admin-section">
           <div class="admin-sec-title">
             <span>✅</span> Tareas pendientes
-            <span id="pendingBadgeAdmin"></span>
             <span class="sec-caret">▼</span>
           </div>
           <div class="admin-body">
@@ -222,7 +229,6 @@
         <div class="admin-section">
           <div class="admin-sec-title">
             <span>🛒</span> Solicitudes de tienda
-            <span id="requestsBadgeAdmin"></span>
             <button class="btn-sync" onclick="syncRequestsNow()" style="margin-left:auto;margin-right:8px;">🔄 Sync</button>
             <span class="sec-caret">▼</span>
           </div>
@@ -232,6 +238,36 @@
         </div>
 
       </div><!-- /admin-tab-inicio -->
+
+      <!-- Tab: Misiones (pool adultos) -->
+      <div id="admin-tab-misiones" style="display:none;">
+        <div class="section-row" style="margin-bottom:14px;">
+          <span class="section-title">⭐ Mis Misiones</span>
+          <span class="pixel-label">HOY</span>
+        </div>
+        <div id="adminMissionsList"></div>
+      </div>
+
+      <!-- Tab: Tienda (admin) -->
+      <div id="admin-tab-tienda" style="display:none;">
+        <div class="hero-card" style="background:linear-gradient(135deg,#F5A623,#FB923C);" onclick="openAdminWarpZone()">
+          <div class="hero-greeting">Tienda de recompensas</div>
+          <div class="hero-name">Mis Premios 🌟</div>
+          <div style="font-size:13px;opacity:0.85;font-weight:700;">Toca para ver tus premios →</div>
+        </div>
+        <div class="section-row">
+          <span class="section-title">Mis solicitudes</span>
+        </div>
+        <div id="adminQuickHistory"></div>
+      </div>
+
+      <!-- Tab: Historial (admin) -->
+      <div id="admin-tab-historial" style="display:none;">
+        <div class="section-row" style="margin-bottom:14px;">
+          <span class="section-title">📜 Mi Historial</span>
+        </div>
+        <div id="adminHistorialList"></div>
+      </div>
 
       <!-- Tab: Gestión -->
       <div id="admin-tab-gestion" style="display:none;">
@@ -306,6 +342,13 @@
                   <option>Premio</option>
                 </select>
               </div>
+              <div class="adm-row">
+                <label>Para</label>
+                <select id="newRewardAudience" class="adm-select" style="flex:1;">
+                  <option value="mateo">👦 Mateo</option>
+                  <option value="adultos">👨‍👩 Adultos</option>
+                </select>
+              </div>
               <button class="btn-adm" onclick="addReward()">🏆 Agregar recompensa</button>
             </div>
             <div style="margin-top:12px;" id="rewardListAdmin"></div>
@@ -332,6 +375,20 @@
       <button class="nav-item active" onclick="showAdminTab('inicio')">
         <span class="nav-icon">🏠</span>
         <span>Inicio</span>
+        <span id="pendingBadgeAdmin"></span>
+        <span id="requestsBadgeAdmin"></span>
+      </button>
+      <button class="nav-item" onclick="showAdminTab('misiones')">
+        <span class="nav-icon">⭐</span>
+        <span>Misiones</span>
+      </button>
+      <button class="nav-item" onclick="showAdminTab('tienda')">
+        <span class="nav-icon">🛒</span>
+        <span>Tienda</span>
+      </button>
+      <button class="nav-item" onclick="showAdminTab('historial')">
+        <span class="nav-icon">📜</span>
+        <span>Historial</span>
       </button>
       <button class="nav-item" onclick="showAdminTab('gestion')">
         <span class="nav-icon">⚙️</span>
@@ -354,7 +411,30 @@
   <!-- TOAST -->
   <div id="toast"></div>
 
-</div><!-- /app --> <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- ═══════════════════════════════════════════
+       ADMIN WARP ZONE MODAL
+  ═══════════════════════════════════════════ -->
+  <div id="adminWarpZoneModal" class="modal-overlay" onclick="if(event.target===this)closeAdminWarpZone()">
+    <div class="modal-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div>
+          <div class="sheet-title">🌟 Mis Premios</div>
+        </div>
+        <div class="sheet-coins">🪙 <span id="adminModalCoinDisplay">0</span></div>
+        <button class="btn-close" onclick="closeAdminWarpZone()">✕</button>
+      </div>
+      <div class="sheet-tabs">
+        <button class="tab-pill active admin-tab-pill" data-tab="premios" onclick="switchAdminTab('premios')">🎁 Premios</button>
+        <button class="tab-pill admin-tab-pill" data-tab="store-hist" onclick="switchAdminTab('store-hist')">📋 Mis pedidos</button>
+      </div>
+      <div id="atab-premios"    class="tab-pane active admin-tab-pane"></div>
+      <div id="atab-store-hist" class="tab-pane admin-tab-pane"></div>
+    </div>
+  </div>
+
+</div><!-- /app -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app.js"></script>
 </body>
 </html>

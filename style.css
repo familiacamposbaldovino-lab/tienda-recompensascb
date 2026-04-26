@@ -691,3 +691,71 @@ input, select, textarea { font-family: var(--font); outline: none; border: none;
   #userSelect { grid-template-columns: 1fr 1fr; }
 }
 ::-webkit-scrollbar { width: 0; }
+
+/* ── Admin nav 5 tabs ── */
+#adminNav .nav-item {
+  font-size: 9px;
+  padding: 8px 2px 6px;
+}
+#adminNav .nav-item .nav-icon {
+  font-size: 17px;
+}
+
+/* ── Admin store-hist (inline list sin modal) ── */
+#admin-store-hist .hist-item,
+#admin-historial-list .hist-item {
+  /* reutiliza .hist-item de style.css */
+}
+
+/* ── Admin store rewards section ── */
+#admin-store-rewards .reward-row {
+  /* reutiliza .reward-row */
+}
+
+/* ── Admin missions list ── */
+#admin-missions-list .mission-card {
+  /* reutiliza .mission-card */
+}
+
+/* ── Topbar coins in admin topbar ── */
+.admin-topbar .topbar-coins {
+  background: rgba(255,255,255,0.15);
+  border-radius: 20px;
+  padding: 4px 10px;
+}
+
+/* ── Admin tab pane (mirrors user tab-pane) ── */
+.admin-tab-pane { display: none; }
+.admin-tab-pane.active { display: block; }
+
+/* ── Admin topbar coins ── */
+#adminScreen .topbar-coins {
+  background: rgba(255,255,255,0.15);
+  border-radius: 20px;
+  padding: 4px 10px;
+  display: flex; align-items: center; gap: 4px;
+}
+
+/* ================================================================
+   MAKAMBÚ SUPABASE LOGIN
+================================================================ */
+.login-form { display: flex; flex-direction: column; gap: 9px; }
+.login-label { font-size: 11px; font-weight: 800; color: var(--text-2); margin-top: 2px; }
+.login-input {
+  width: 100%; padding: 12px 14px;
+  background: var(--bg);
+  border: 2px solid var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 14px; font-weight: 700;
+  color: var(--text);
+  transition: border-color 0.2s, background 0.2s;
+}
+.login-input:focus { border-color: var(--accent); background: var(--white); }
+.login-error { display: none; font-size: 12px; color: var(--red); font-weight: 800; text-align: center; padding: 4px 0; }
+.login-error.visible { display: block; }
+.login-note { margin-top: 12px; font-size: 11px; color: var(--text-3); text-align: center; font-weight: 700; }
+.progress-note { font-size: 12px; font-weight: 800; opacity: 0.92; margin-top: 8px; }
+.lock-note { font-size: 10px; font-weight: 800; color: var(--red); margin-top: 2px; }
+.adjust-grid { display: grid; grid-template-columns: 1fr; gap: 7px; }
+.adjust-btn { width: 100%; text-align: left; padding: 9px 10px; border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 800; }
+.adjust-btn:hover { background: var(--red-soft); color: var(--red); }
